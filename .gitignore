@@ -25,3 +25,7 @@ venv/
 !/reports/
 /reports/*
 !/reports/candidate_analysis.md
+
+# Keep Phase 6's specification and comparison reviewable; new tests stay local.
+!/RECOMMENDATION_MVP_SPEC.md
+!/reports/model_comparison.md

@@ -357,3 +357,140 @@ final-test reservation.
 the real dataset produced byte-identical training/validation CSVs, metadata,
 and analysis report. The source database and existing model artifacts remained
 unchanged. The final test snapshot remains reserved.
+
+## Phase 6 — implemented
+
+Phase 6 trains a regularized logistic ranker and compares five ranking methods
+on the same Phase 5 candidate union. Complete tuning results, coefficient
+interpretations, ranking examples, and limitations are in
+[reports/model_comparison.md](reports/model_comparison.md).
+
+### Run
+
+From the project root, using the imported synthetic database:
+
+```text
+uv run python -B -m src.train
+uv run python -B -m pytest tests -q -p no:cacheprovider
+```
+
+The training command accepts `--db`, `--seed` (42), `--negative-ratio` (3),
+`--model logistic|blend` (logistic), `--artifact`
+(`artifacts/model_bundle.pkl`), and `--report`
+(`reports/model_comparison.md`). It rebuilds the four training snapshots and
+unsampled validation rows in memory using Phase 5's existing functions. It does
+not depend on potentially stale `data/rank` exports or rewrite those exports,
+the candidate analysis, or the database. The final test window is not built or
+evaluated. Each output is replaced atomically; the artifact and report are not
+one transaction.
+
+To deliberately choose the blend and retain the default logistic artifact:
+
+```text
+uv run python -B -m src.train --model blend --artifact artifacts/blend_bundle.pkl --report reports/blend_comparison.md
+```
+
+Model choice never changes automatically based on validation performance. Empty
+or one-class training and unsuccessful logistic tuning cause a clear error when
+logistic was requested, leaving its existing artifact intact. Explicit blend
+selection can still produce an artifact/report when logistic is unavailable.
+
+### Features, fitting, and serving interface
+
+`src.ranker.fit_ranker(training_rows, C=1.0, class_weight=None, seed=42)` selects
+the existing 14 `FEATURE_COLUMNS` by name. IDs, timestamps, labels, and future
+exposure metadata are excluded. The complete pipeline uses training-fitted
+median imputation (retaining all-missing columns), standard scaling, and
+regularized logistic regression with the LBFGS solver and 2,000-iteration limit.
+`Ranker.score(feature_rows)` preserves input-row order and returns
+`predict_proba(... )[:, 1]`. Missing required features, duplicate feature names,
+nonnumeric values, and infinities fail clearly; NaNs are imputed and empty
+inference returns an empty array. Reordered columns retain identical scores.
+
+Eight configurations cross `C = 0.01, 0.1, 1, 10` with no class weighting or
+`balanced`. Validation MAP@10 selects the winner; ties use Recall@10, smaller C,
+then no class weighting. Preprocessing and coefficients never fit validation
+rows. The selected pipeline remains fitted on older snapshots, while saved
+candidate generators are fitted at the validation cutoff, **2025-03-17 UTC**.
+
+The ignored bundle stores the entire ranker pipeline/schema, bounded
+collaborative serving state without its training visitor–item matrix, the fitted
+content representation, explicit model choice, and cutoff/sampling/package
+provenance. Load only trusted local pickle files. A direct Python inference path
+for Phase 7 is:
+
+```python
+from src.data import load_events, load_items
+from src.rank_features import prepare_rank_context
+from src.ranker import load_bundle
+
+bundle = load_bundle("artifacts/model_bundle.pkl", expected_model="logistic")
+context = prepare_rank_context(
+    load_events(), load_items(), bundle.metadata["serving_cutoff"]
+)
+visitor = "visitor_0001"
+history = context.histories.get(visitor, context.history.iloc[:0])
+recommendations = bundle.recommend(visitor, history, context).head(10)
+```
+
+The loader rejects incompatible schemas, mismatched generator cutoffs/catalogs,
+and an artifact that does not match the requested model. Missing artifacts fail;
+there is no silent model switch. Unknown visitors receive up to ten popularity
+candidates because missing-history features were not represented in training.
+Known visitors receive the whole ordered candidate pool before the caller
+selects top 10; category diversity rules and HTTP serving remain Phase 7 work.
+
+### Validation findings and learning checkpoint
+
+Seed 42 produces the existing **196 training rows (49 positives)** and **1,744
+unsampled validation rows (13 retrieved positives)**. All five methods share
+**0.847222 candidate Recall@50**, covering 13 of 16 recommendable positive pairs.
+Quality averages include the same **12 historical visitors**. Cold-start quality
+is unavailable because its one observed visitor has no recommendable outcome.
+
+| Method | Precision@10 | Recall@10 | MAP@10 | Coverage |
+| --- | ---: | ---: | ---: | ---: |
+| Popularity | 0.016667 | 0.166667 | 0.069444 | 11% |
+| Collaborative | 0.075000 | 0.652778 | 0.181812 | 65% |
+| Content | 0.050000 | 0.388889 | 0.102778 | 71% |
+| Fixed blend | 0.066667 | 0.611111 | 0.218849 | 63% |
+| Logistic | 0.066667 | 0.527778 | 0.164616 | 64% |
+
+The winning logistic configuration is **C=0.01 with no class weighting**. It
+beats popularity and content on MAP@10 but trails collaborative ranking and the
+blend. This measured result is retained; no claim of ML superiority is made.
+Individual-source baselines score every union item with that source's actual
+score, while logistic features preserve nomination scores/flags. The fixed blend
+uses 0.4 collaborative + 0.4 content + 0.2 popularity after per-visitor,
+per-source min–max normalization; constant sources contribute zero. Score ties
+use ascending item ID. No candidates or missed positives are added by ranking.
+
+Label 1 means a cart or purchase in the seven days following the snapshot.
+Negatives mean no observed target action, not dislike. The 3:1 exposure-first
+sampling changes class prevalence, so logistic outputs are **ordering scores,
+not calibrated purchase probabilities**. Logistic regression's binary objective
+and regularization suit this label better than ridge's squared-error numeric
+objective. Balanced class weights were tested on unsampled validation and did
+not improve the selected configuration.
+
+Coefficients describe conditional log-odds changes per training standard
+deviation after imputation/scaling. Collaborative nomination score (**+0.0311**),
+content nomination score (**+0.0624**), and historical category affinity
+(**+0.0080**) raise the ordering score when other features are fixed. Item price
+(**−0.0755**) lowers it. These associations are neither causal effects nor
+independent measures of feature importance. The report traces visitor_0003's
+item_0069 features through the transformed linear score and sigmoid.
+
+Scoring latency is measured separately on prepared rows with one warm-up and
+20 repetitions per historical visitor. It excludes sorting, retrieval, feature
+construction, fitting, and HTTP work; source baselines simply read their
+prepared scores. Values vary per run and are recorded in the report. The small
+synthetic cohort, candidate omissions, negative-label uncertainty, and validation
+tuning limit confidence; offline metrics do not prove business uplift.
+
+**Checks:** **205 tests pass** (168 existing plus 37 Phase 6 cases), covering
+feature schemas, preprocessing/inference isolation, deterministic fitting,
+fixed-pool comparisons, blend arithmetic, cold start, purchase/availability
+exclusions, explicit model choice, one-class/nonconvergence behavior, atomic
+artifact failure handling, saved-model parity, CLI reproducibility, and final
+test reservation.
