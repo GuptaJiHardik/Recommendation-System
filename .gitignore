@@ -15,17 +15,14 @@ venv/
 *.md
 /reports/
 
-# Keep Phase 4's instructions and tests reviewable without including older ignored files.
+# Keep the README reviewable; test files remain local.
 !/README.md
-!/tests/
-/tests/*
-!/tests/test_content_based.py
 
 # Keep Phase 5's analysis reviewable; its tests remain local.
 !/reports/
 /reports/*
 !/reports/candidate_analysis.md
 
-# Keep Phase 6's specification and comparison reviewable; new tests stay local.
-!/RECOMMENDATION_MVP_SPEC.md
+# Keep the Phase 6 comparison reviewable; the specification stays local.
 !/reports/model_comparison.md
+/RECOMMENDATION_MVP_SPEC.md

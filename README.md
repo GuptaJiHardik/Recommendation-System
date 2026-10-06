@@ -1,6 +1,36 @@
-# Recommendation MVP — Phases 0–4
+# Recommendation MVP — Phases 0–7
 
-Phase 0 creates a small exposure-linked e-commerce dataset for learning and inspection. Generated CSVs live in `data/synthetic/` and are ignored by Git. Phase 1 loads them into SQLite and recommends products by popularity. Phase 2 establishes chronological evaluation; Phase 3 adds item-to-item collaborative retrieval. Phase 4 adds metadata-based content retrieval. Phase 5 and later in `RECOMMENDATION_MVP_SPEC.md` are not implemented yet.
+A local, learning-first recommendation system that retrieves product candidates,
+ranks them with a saved ML model, and serves recommendations through FastAPI.
+Phases 0–7 are implemented: synthetic data, SQLite validation/import, chronological
+evaluation, collaborative and content retrieval, candidate union, logistic
+ranking, and final eligibility/diversity rules. Unknown visitors receive a
+popularity fallback. This project demonstrates reproducible offline behavior;
+it does not claim production deployment or business uplift.
+
+## Quick start
+
+Requires Python 3.11 or newer and `uv`. From a fresh checkout, run these commands
+from the repository root:
+
+```text
+uv sync --no-dev
+uv run python -B -m src.generate_synthetic
+uv run python -B -m src.data
+uv run python -B -m src.train
+uv run uvicorn src.api:app --host 127.0.0.1 --port 8000
+```
+
+Then open `http://127.0.0.1:8000/docs`, or request `/health` and
+`/recommendations/visitor_0001?k=10`. The Phase 7 section below documents API
+configuration, unknown visitors, the soft 40% category cap, and measured latency.
+The default model is logistic; serving uses the saved **2025-03-17 UTC** cutoff.
+
+Generated data and model artifacts are excluded from Git and must be built
+locally. Test files and the implementation specification also remain local and
+are intentionally excluded from the published repository. Test counts below
+record local verification; a fresh checkout does not include that test suite.
+Real-data adaptation in Phase 8 remains future work.
 
 ## Run
 
@@ -43,13 +73,12 @@ The most active item has 46 events; several items have none or one. The profiler
 
 Added strict CSV validation and deduplication, atomic SQLite import/read, six chronological snapshots, and weighted popularity recommendations with purchase filtering and unknown-visitor fallback.
 
-Run from the project root (Pandas and pytest are declared in `pyproject.toml`):
+Run from the project root (Pandas is declared in `pyproject.toml`):
 
 ```text
 uv run --no-project --with "pandas>=2.2,<3" python -m src.data
 uv run --no-project --with "pandas>=2.2,<3" python -m src.split
 uv run --no-project --with "pandas>=2.2,<3" python -m src.popularity visitor_0001 visitor_0032 visitor_0050 visitor_unknown --as-of 2025-03-17T00:00:00Z --k 10
-uv run --no-project --with "pandas>=2.2,<3" --with "pytest>=8,<10" python -m pytest tests/test_data.py -q
 ```
 
 `src.data` validates IDs, UTC timestamps, prices, types, and product/impression references before writing `data/recommendations.db`. Exact duplicates are removed; other invalid rows fail with diagnostics and preserve the existing database. Imported: **100 items, 1,323 events, 3,763 impressions; zero duplicates**.
@@ -80,7 +109,7 @@ Popularity sums pre-cutoff views/carts/purchases with weights **1/3/5**; ties us
 
 ## Phase 2 — implemented
 
-`src/evaluate.py` evaluates retrieval and ranking separately, with hand-calculated metric tests and the protocol/results in [reports/baseline.md](reports/baseline.md). Relevance is a distinct held-out cart or purchase on an eligible item, excluding prior purchases. Personalized averages require history and a recommendable positive; cold start is reported separately. Phase 2 had 77 passing tests. The final test window remains reserved.
+`src/evaluate.py` evaluates retrieval and ranking separately, with hand-calculated metric tests and locally recorded baseline results. Relevance is a distinct held-out cart or purchase on an eligible item, excluding prior purchases. Personalized averages require history and a recommendable positive; cold start is reported separately. Phase 2 had 77 passing tests. The final test window remains reserved.
 
 ## Phase 3 — implemented
 
@@ -94,7 +123,6 @@ Run from the project root after importing the database:
 uv run --no-project --with "pandas>=2.2,<3" --with "numpy>=1.26,<3" --with "scipy>=1.12,<2" python -B -m src.collaborative recommend visitor_0001 visitor_0032 visitor_0050 visitor_unknown --as-of 2025-03-17T00:00:00Z --k 10
 uv run --no-project --with "pandas>=2.2,<3" --with "numpy>=1.26,<3" --with "scipy>=1.12,<2" python -B -m src.collaborative recommend visitor_0045 --as-of 2025-03-17T00:00:00Z --k 50
 uv run --no-project --with "pandas>=2.2,<3" --with "numpy>=1.26,<3" --with "scipy>=1.12,<2" python -B -m src.collaborative evaluate
-uv run --no-project --with "pandas>=2.2,<3" --with "numpy>=1.26,<3" --with "scipy>=1.12,<2" --with "pytest>=8,<10" python -B -m pytest tests -q -p no:cacheprovider
 ```
 
 Dependencies are also declared in `pyproject.toml`, so `uv run python -m src.collaborative ...` works with a project environment. Both subcommands accept `--db` and `--neighbors-per-item`. Evaluation always uses the existing validation snapshot and prints per-visitor candidates, metrics, and differences as JSON; it does not evaluate the final test snapshot. No weights or neighbor counts were tuned.
@@ -159,7 +187,6 @@ From the project root, using the existing imported database:
 uv sync
 uv run python -B -m src.content_based recommend visitor_0001 visitor_0032 visitor_0050 visitor_0045 visitor_unknown --as-of 2025-03-17T00:00:00Z --k 10
 uv run python -B -m src.content_based evaluate
-uv run python -B -m pytest tests -q -p no:cacheprovider
 ```
 
 Both subcommands accept `--db`. `recommend` prints JSON with product metadata and a source-item trace for the first personalized candidate. `evaluate` fits fresh content and collaborative models at the existing validation cutoff, compares them with popularity through the unchanged evaluator, and prints metrics, per-visitor candidate IDs, metric differences, category counts, and examples of retrieved items with no earlier events. It neither evaluates the final test snapshot nor writes model artifacts. The scikit-learn dependency is declared in `pyproject.toml`; the measured run used version 1.9.1.
@@ -239,7 +266,7 @@ The unrounded contributions sum to **0.8886768635759622**. An interaction streng
 - **Why it can become narrow:** repeated behavior pulls the profile toward similar metadata. Here, descriptions repeat category and brand, reinforcing those preferences even with equal block weights.
 - **How event weights matter:** a cart contributes three times a view and a purchase five times a view before averaging; repeated events accumulate. Stronger evidence changes the profile's direction, while uniformly multiplying all strengths leaves cosine scores unchanged. Purchase evidence remains useful even though the purchased product is filtered out.
 
-**Limitations:** the text is short, synthetic, and templated. Shared boilerplate gives some unrelated items small positive similarities. Equal block weights and five quantile buckets are fixed hypotheses; prices within a bucket are indistinguishable, and crossing a boundary changes that feature abruptly. The later real dataset may lack usable descriptions, brands, or prices; do not manufacture those fields or assume this text representation transfers. These offline results on simulated exposure establish reproducible behavior, not business uplift. Content persistence, candidate union, learned ranking, and final diversity rules remain later-phase work.
+**Limitations:** the text is short, synthetic, and templated. Shared boilerplate gives some unrelated items small positive similarities. Equal block weights and five quantile buckets are fixed hypotheses; prices within a bucket are indistinguishable, and crossing a boundary changes that feature abruptly. The later real dataset may lack usable descriptions, brands, or prices; do not manufacture those fields or assume this text representation transfers. These offline results on simulated exposure establish reproducible behavior, not business uplift. The following phases add content persistence, candidate union, learned ranking, and final diversity rules.
 
 **Checks:** **128 tests pass** (99 existing plus 29 Phase 4 cases), covering exact profiles/scores/traces, isolated feature effects, TF-IDF, quantile boundaries and ties, unseen-item retrieval, weights, purchase exclusion, deterministic ordering, cutoff leakage, empty inputs, invalid arguments, SQL fallback parity, diagnostics, and validation-only CLI behavior without artifact writes. Additional inspection verified purchase exclusions and top-10 explanation totals for all 49 known visitors. The final test window remains reserved.
 
@@ -256,7 +283,6 @@ After importing the synthetic data into SQLite, run from the project root:
 
 ```text
 uv run python -B -m src.rank_dataset build
-uv run python -B -m pytest tests -q -p no:cacheprovider
 ```
 
 `build` accepts `--db`, `--seed` (default 42), `--negative-ratio` (default 3),
@@ -371,7 +397,6 @@ From the project root, using the imported synthetic database:
 
 ```text
 uv run python -B -m src.train
-uv run python -B -m pytest tests -q -p no:cacheprovider
 ```
 
 The training command accepts `--db`, `--seed` (42), `--negative-ratio` (3),
@@ -438,7 +463,8 @@ and an artifact that does not match the requested model. Missing artifacts fail;
 there is no silent model switch. Unknown visitors receive up to ten popularity
 candidates because missing-history features were not represented in training.
 Known visitors receive the whole ordered candidate pool before the caller
-selects top 10; category diversity rules and HTTP serving remain Phase 7 work.
+selects top 10. The Phase 7 API applies final filtering and category diversity
+to that pool; see the serving instructions below.
 
 ### Validation findings and learning checkpoint
 
@@ -494,3 +520,197 @@ fixed-pool comparisons, blend arithmetic, cold start, purchase/availability
 exclusions, explicit model choice, one-class/nonconvergence behavior, atomic
 artifact failure handling, saved-model parity, CLI reproducibility, and final
 test reservation.
+
+## Phase 7 — implemented
+
+The FastAPI backend serves the existing two-stage model with purchase filtering
+and a soft category cap. The synthetic serving snapshot remains frozen at
+**2025-03-17 UTC**, using the cutoff saved in the configured bundle. It does not
+advance to today's date or read fresh visitor history on each request.
+
+### Run and configuration
+
+From the project root, with the database and Phase 6 bundle already built:
+
+```text
+uv sync
+uv run uvicorn src.api:app --host 127.0.0.1 --port 8000
+```
+
+Call the endpoints from a second PowerShell terminal:
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:8000/health'
+Invoke-RestMethod 'http://127.0.0.1:8000/recommendations/visitor_0001?k=10' | ConvertTo-Json -Depth 5
+Invoke-RestMethod 'http://127.0.0.1:8000/recommendations/visitor_unknown?k=10' | ConvertTo-Json -Depth 5
+```
+
+Interactive API documentation is available at `http://127.0.0.1:8000/docs`.
+Startup configuration uses these environment variables:
+
+| Variable | Default |
+| --- | --- |
+| `RECOMMENDATION_DB` | `data/recommendations.db` |
+| `RECOMMENDATION_ARTIFACT` | `artifacts/model_bundle.pkl` |
+| `RECOMMENDATION_MODEL` | `logistic` |
+
+To serve the deliberately trained Phase 6 blend alternative, set both
+`RECOMMENDATION_MODEL=blend` and `RECOMMENDATION_ARTIFACT=artifacts/blend_bundle.pkl`.
+The existing training command for that artifact is in the Phase 6 instructions.
+The API never chooses a different model because validation results look better.
+
+`create_app(db_path=..., artifact_path=..., expected_model=...,
+category_share=0.4)` provides explicit overrides for tests or Python callers.
+App construction performs no data loading. Lifespan startup loads the bundle,
+events, and catalog once, checks compatibility, and prepares shared historical
+aggregates. Missing/corrupt bundles, model mismatches, unreadable databases,
+incompatible catalogs, invalid categories, or an invalid category share abort
+startup with a clear error. Configure only trusted local pickle artifacts.
+Restart the server to pick up any data, artifact, or configuration change.
+
+### Response and final ranking
+
+`GET /health` returns `status`, `model_version`, `model`, and `serving_cutoff`.
+Version is `local-` followed by twelve SHA-256 hexadecimal characters from the
+artifact; the current local bundle is `local-25da96ceed0b`. This fingerprints the
+model file, not the database or final-ranking configuration.
+
+`GET /recommendations/{visitor_id}?k=10` accepts integer `k` from **1–50**.
+Invalid `k` or a whitespace-only visitor ID returns **422**. Results contain
+`visitor_id`, `model_version`, and a `recommendations` list. Each item has
+`item_id`, finite `score`, and nomination `sources` in collaborative/content/
+popularity order. A source flag determines attribution even if its nomination
+score is zero. An empty eligible pool returns **200** with an empty list.
+
+Known visitors use the configured saved model. Visitors without history before
+the cutoff receive at most ten popularity candidates with only `popularity`
+source flags. Logistic scores are ordering signals, not calibrated conversion
+probabilities; fallback scores are weighted historical popularity counts and
+can exceed one. Scores should not be compared between those two paths.
+
+Final ranking sorts by descending score, with ascending item ID for ties, and
+defensively removes purchased/unavailable items. Its first pass allows at most
+`ceil(0.4 * k)` items in one category: **four** at `k=10`. If alternatives cannot
+fill the requested list, a second pass appends skipped candidates in score
+order. Backfill can exceed the cap, while a short eligible pool stays short.
+The result therefore may not be globally sorted by score. No scores change and
+no additional candidates are retrieved. Diversity applies to fallback lists too.
+Use `category_share=None` to disable diversity for a direct comparison.
+
+To reproduce API results through Python, use the Phase 6 loading/context example
+and replace its final line with:
+
+```python
+from src.final_ranking import apply_final_ranking
+
+ranked = bundle.recommend(visitor, history, context)
+purchased = context.visitor_stats.get(visitor, {}).get("purchased", set())
+recommendations = apply_final_ranking(ranked, context.catalog, purchased, k=10)
+```
+
+### Observed requests and item trace
+
+For `visitor_0001`, the first three API items are item_0020 (**0.294860**),
+item_0075 (**0.293918**), and item_0040 (**0.285879**), each nominated by both
+collaborative and content retrieval. Unknown visitors begin with item_0008
+(**62**), item_0002 (**61**), and item_0003 (**55**), attributed to popularity.
+
+Tracing visitor_0001's **item_0020**, a sports product:
+
+| Shared feature | Value |
+| --- | ---: |
+| `collab_score` | 6.0958278058592565 |
+| `content_score` | 0.7730323025373582 |
+| `popularity_score` | 0.0 (not nominated by popularity) |
+| `from_collab`, `from_content`, `from_popularity` | 1, 1, 0 |
+| `visitor_view_count`, `visitor_cart_count`, `visitor_purchase_count` | 10, 2, 0 |
+| `days_since_last_activity` | 1.2984375 |
+| `visitor_category_affinity` | 0.8125 |
+| `item_interaction_count` | 10 |
+| `item_price` | 55.09 |
+| `visitor_item_price_gap` | 6.21125 |
+
+All history and behavioral aggregates are strictly before the saved cutoff;
+category/price are available static catalog attributes. The saved preprocessing
+and logistic ranker produce **0.2948601255492873**. This item is eligible and
+occupies position **1** both before final ranking and in the API response.
+
+### Verification and whole-request latency
+
+**253 tests pass**: 205 existing plus 48 Phase 7 cases. New coverage includes
+soft-cap selection/backfill, rounding, score ties, eligibility, input validation,
+health/contracts, logistic and explicitly selected blend bundles, environment
+overrides, startup failures, one-time loading, immutable request state, source
+flags, empty output, and cutoff isolation. The installed Starlette version emits
+one deprecation warning for its HTTPX test-client compatibility; tests still pass.
+All test files remain local under the repository's ignore rules.
+
+Real Uvicorn HTTP inspection verified **150 exact parity checks**: all 49 known
+visitors plus one unknown visitor, each at `k=1`, `10`, and `50`. IDs, scores,
+sources, and final positions matched the direct path. Purchases were excluded,
+invalid bounds returned 422, and database/artifact SHA-256 checks stayed unchanged.
+The final test snapshot was not built or evaluated.
+
+Measured on **2026-10-06**, one Uvicorn worker on loopback port 8000 with access
+logging disabled, a persistent HTTPX client, sequential requests, and `k=10`:
+
+| Segment | Visitors | Timed requests | p50 | p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Known | 49 | 980 | 20.68 ms | 24.76 ms |
+| Unknown | 1 | 20 | 22.26 ms | 28.80 ms |
+
+Each visitor had three untimed parity requests before twenty timed requests.
+Client timing surrounds the complete `client.get(...)`, including retrieval,
+shared feature construction, scoring, final ranking, serialization, and loopback
+HTTP response transfer. It excludes startup, offline training, and subsequent
+client JSON parsing. These are local warm-request observations, not a latency SLO.
+
+To repeat the timing with the same protocol, run the following Python code from
+the project root while the API is running (for example via `uv run python -B -`
+with a PowerShell here-string):
+
+```python
+from time import perf_counter
+import httpx
+import numpy as np
+from src.data import load_events, load_items
+from src.rank_features import prepare_rank_context
+from src.ranker import load_bundle
+
+bundle = load_bundle("artifacts/model_bundle.pkl", expected_model="logistic")
+context = prepare_rank_context(load_events(), load_items(), bundle.metadata["serving_cutoff"])
+samples = {"known": [], "unknown": []}
+with httpx.Client(base_url="http://127.0.0.1:8000", timeout=30, trust_env=False) as client:
+    for visitor in sorted(context.histories) + ["visitor_unknown"]:
+        for k in (1, 10, 50):
+            client.get(f"/recommendations/{visitor}", params={"k": k}).raise_for_status()
+        for _ in range(20):
+            start = perf_counter()
+            response = client.get(f"/recommendations/{visitor}", params={"k": 10})
+            elapsed_ms = (perf_counter() - start) * 1000
+            response.raise_for_status()
+            samples["known" if visitor in context.histories else "unknown"].append(elapsed_ms)
+for segment, values in samples.items():
+    print(segment, len(values), "requests; p50/p95 ms:", np.percentile(values, [50, 95]))
+```
+
+### Learning checkpoint and limits
+
+Offline training builds time-aware labels, fits retrieval models, learns
+preprocessing/coefficient values, and saves an artifact. Requests reuse those
+states, retrieve the bounded 20/20/10 union, compute the same feature columns,
+and score the pool. This avoids fitting or database reads on the request path.
+Bounded pools limit expensive feature/scoring work, although these small local
+retrievers still inspect catalog representations and this is not large-catalog
+scalability evidence. Missing candidates cannot be recovered by final ranking.
+
+The ML ranker learns an ordering from historical behavior. Final ranking applies
+explicit eligibility and diversity policy afterward, potentially trading score
+order for less repetition. It does not learn a new model or guarantee higher
+offline quality. Popularity fallback remains deliberate because missing-history
+features were absent from ranker training.
+
+Production behavior remains unproven: frozen history ignores later purchases,
+catalog revisions are not modeled, load/concurrency limits are unmeasured, and
+there is no authentication, deployment, live retraining, A/B evidence, or real
+business-uplift claim. Phase 8's real-data work remains outstanding.
