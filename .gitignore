@@ -14,3 +14,9 @@ venv/
 /test/
 *.md
 /reports/
+
+# Keep Phase 4's instructions and tests reviewable without including older ignored files.
+!/README.md
+!/tests/
+/tests/*
+!/tests/test_content_based.py
