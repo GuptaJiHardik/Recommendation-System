@@ -242,3 +242,118 @@ The unrounded contributions sum to **0.8886768635759622**. An interaction streng
 **Limitations:** the text is short, synthetic, and templated. Shared boilerplate gives some unrelated items small positive similarities. Equal block weights and five quantile buckets are fixed hypotheses; prices within a bucket are indistinguishable, and crossing a boundary changes that feature abruptly. The later real dataset may lack usable descriptions, brands, or prices; do not manufacture those fields or assume this text representation transfers. These offline results on simulated exposure establish reproducible behavior, not business uplift. Content persistence, candidate union, learned ranking, and final diversity rules remain later-phase work.
 
 **Checks:** **128 tests pass** (99 existing plus 29 Phase 4 cases), covering exact profiles/scores/traces, isolated feature effects, TF-IDF, quantile boundaries and ties, unseen-item retrieval, weights, purchase exclusion, deterministic ordering, cutoff leakage, empty inputs, invalid arguments, SQL fallback parity, diagnostics, and validation-only CLI behavior without artifact writes. Additional inspection verified purchase exclusions and top-10 explanation totals for all 49 known visitors. The final test window remains reserved.
+
+## Phase 5 — implemented
+
+Phase 5 creates a bounded candidate union, a shared as-of-time feature function,
+and snapshot datasets for Phase 6. The measured retrieval and sampling results,
+missed positives, and a complete feature/label trace are in
+[reports/candidate_analysis.md](reports/candidate_analysis.md).
+
+### Run and outputs
+
+After importing the synthetic data into SQLite, run from the project root:
+
+```text
+uv run python -B -m src.rank_dataset build
+uv run python -B -m pytest tests -q -p no:cacheprovider
+```
+
+`build` accepts `--db`, `--seed` (default 42), `--negative-ratio` (default 3),
+`--output-dir` (default `data/rank`), and `--report` (default
+`reports/candidate_analysis.md`). It refits both generators independently at
+each of the existing four training cutoffs and the validation cutoff. It does
+not build or evaluate the final test snapshot, save model artifacts, or train a
+ranker. Source data is opened read-only. Each output file is replaced atomically;
+metadata is written last, but the entire output bundle is not one transaction.
+
+The ignored output directory contains:
+
+- `train.csv`: sampled training rows from the four older snapshots.
+- `validation.csv`: every generated candidate for every visitor with pre-cutoff
+  event history at the validation snapshot, without negative sampling.
+- `metadata.json`: ordered feature schema, cutoffs, source budgets, weights,
+  sampling configuration, class counts, retrieval diagnostics, and example traces.
+
+On the current seed-42 database, the command produces **196 training rows
+(49 positives + 147 negatives)** and **1,744 validation rows (13 positives)**.
+All 147 sampled negatives have an impression in their outcome window; proxy
+negatives are supported but unnecessary for this run. These are reproducible
+observations, not hard-coded dataset requirements.
+
+### Candidate and feature interfaces
+
+`src.candidates.generate_candidates(visitor_id, history, collaborative_model,
+content_model)` returns a DataFrame with up to 20 collaborative, 20 content,
+and 10 popularity nominations, deduplicated by item ID. Models must have the
+same cutoff and available catalog. Short personalized lists are not backfilled
+beyond these budgets. Unknown visitors receive at most ten popularity candidates
+with only popularity source flags, rather than attributing either retriever's
+existing fallback to a personalized source. Prior purchases and unavailable
+products remain excluded.
+
+Each row retains `collab_score`, `content_score`, `popularity_score`, and
+`from_collab`, `from_content`, `from_popularity`. An absent nomination uses
+score **0.0** and flag **0**; a nominated zero-score popularity item has flag
+**1**. The union is sorted by item ID for reproducibility and has no learned or
+blended ranking. Raw generator scores have different scales.
+
+`src.rank_features.prepare_rank_context(events, items, as_of_time)` prepares
+historical aggregates once. `build_rank_features(visitor_id, candidates,
+as_of_time, context)` returns `item_id` plus the ordered `FEATURE_COLUMNS`:
+
+- Three nomination scores and three source flags.
+- Separate visitor view, cart, and purchase event counts; fractional days since
+  last activity.
+- Visitor-category affinity: weighted strength for the candidate category divided
+  by total visitor strength, using the existing view/cart/purchase weights 1/3/5.
+- Item interaction count, available item price, and absolute price difference
+  from the visitor's event-weighted mean historical item price.
+
+Behavioral features and candidate fitting use only events strictly before the
+cutoff. Creation times at the cutoff are available. Prices and categories are
+assumed static because the catalog has no revision history. Empty-history visitor
+counts and category affinity are zero; recency and price gap remain missing for
+Phase 6's preprocessing. `item_id` is join metadata, excluded from model inputs.
+
+### Labels, sampling, and learning checkpoint
+
+`src.rank_dataset.build_snapshot_dataset(snapshot, events, items, impressions=None)`
+returns all labeled rows and diagnostics. Each `(snapshot, visitor_id, item_id)`
+is unique. A future cart or purchase in `[cutoff, cutoff + 7 days)` sets label 1;
+repeated actions collapse into one label. View-only outcomes are label 0.
+Visitors with past events but no future positives still contribute candidate
+rows. Cold-start quality is reported separately using the existing evaluator.
+Relevant items absent from the union are recorded as misses, never inserted.
+
+`sample_training_rows(rows, negative_ratio=3, seed=42)` retains every retrieved
+positive and samples up to three negatives per positive **across each snapshot**.
+It first samples label-0 candidates shown in that outcome window, then fills a
+shortage from unexposed label-0 candidates. The seed is applied independently to
+each snapshot after sorting visitor/item pairs. A snapshot with no retrieved
+positives contributes no sampled rows, with an explicit diagnostic. Exposure
+flags and provenance are metadata only; future impressions never enter features.
+Missing impressions require proxy negatives. An absent target action does not
+prove dislike, and sampling changes class prevalence, so later scores should
+not be described as calibrated purchase probabilities.
+
+Validation union candidate **Recall@50 is 0.847222** (macro visitor recall),
+retrieving **13/16** recommendable positive pairs (micro recall **0.8125**).
+Pool sizes are **28–42**, with mean **35.59** across 49 historical visitors.
+The earlier collaborative/content results used 50 candidates from each source
+separately; their 100% recall is not a comparison at the same budget.
+The three omitted pairs are listed in the analysis report. A ranker can only
+reorder retrieved items, so it cannot repair these omissions. Inspect retrieval
+limitations before proceeding to Phase 6.
+
+The report traces one row's source scores, historical aggregates, available
+metadata, and future label timestamps. IDs, snapshot role, outcome end, labels,
+exposure flags, and provenance stay outside `FEATURE_COLUMNS`. Tests cover
+hand-calculated features and recall, cutoff/label boundaries, future-data leakage,
+source flags, sampling, proxy fallback, deterministic exports, cold start, and
+final-test reservation.
+
+**Checks:** **168 tests pass** (128 existing plus 40 Phase 5 cases). Rebuilding
+the real dataset produced byte-identical training/validation CSVs, metadata,
+and analysis report. The source database and existing model artifacts remained
+unchanged. The final test snapshot remains reserved.

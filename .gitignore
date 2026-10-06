@@ -20,3 +20,8 @@ venv/
 !/tests/
 /tests/*
 !/tests/test_content_based.py
+
+# Keep Phase 5's analysis reviewable; its tests remain local.
+!/reports/
+/reports/*
+!/reports/candidate_analysis.md
