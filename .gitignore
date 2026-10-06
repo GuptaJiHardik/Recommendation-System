@@ -1,0 +1,16 @@
+data/
+artifacts/
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+/tests/
+/test/
+*.md
+/reports/

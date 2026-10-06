@@ -1,0 +1,9 @@
+[project]
+name = "recommendation-mvp"
+version = "0.0.1"
+description = "A local recommendation-system learning project"
+requires-python = ">=3.11"
+dependencies = ["pandas>=2.2,<3", "numpy>=1.26,<3", "scipy>=1.12,<2"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
